@@ -1,17 +1,14 @@
 
-#include <Arduino.h>
-#include <Wire.h>
-#include <SPI.h>
+#include "driver/i2c.h"
 #include "paj7620.h"
 #include "pag7660.h"
-
-#define GESTURE_SPI_USELESS 0xff
+#include <string.h>
 
 class Pixart_Gesture
 {
    protected:
-      uint8_t spi_cs;
       uint8_t i2c_addr;
+      i2c_port_t i2c_port = I2C_NUM_0;
       void writeReg(uint8_t addr, uint8_t value);
       void readRegs(uint8_t addr, uint8_t *values, int size);
       uint8_t readReg(uint8_t addr);
@@ -36,7 +33,7 @@ class pag7660 : public Pixart_Gesture
       pag7660(int mode = GESTURE_COMBINED_MODE) {
          gestureMode = mode;
       };
-      bool init(uint8_t cs = GESTURE_SPI_USELESS);
+      bool init();
       bool getResult(pag7660_gesture_t& res);
       bool getOutput(pag7660_out_t& out);
 

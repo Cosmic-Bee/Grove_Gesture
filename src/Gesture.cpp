@@ -31,37 +31,30 @@
 #include "Gesture.h"
 
 void Pixart_Gesture::writeReg(uint8_t addr, uint8_t value) {
-    if(spi_cs != GESTURE_SPI_USELESS) {
-        digitalWrite(spi_cs, LOW);
-        SPI.transfer(addr & 0x7f);
-        SPI.transfer(value);
-        digitalWrite(spi_cs, HIGH);
-    } else {
-        Wire.beginTransmission(i2c_addr);
-        Wire.write(addr);
-        Wire.write(value);
-        Wire.endTransmission();
-    }
+    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+    i2c_master_start(cmd);
+    i2c_master_write_byte(cmd, (i2c_addr << 1) | I2C_MASTER_WRITE, true);
+    i2c_master_write_byte(cmd, addr, true);
+    i2c_master_write_byte(cmd, value, true);
+    i2c_master_stop(cmd);
+    i2c_master_cmd_begin(i2c_port, cmd, 1000 / portTICK_PERIOD_MS);
+    i2c_cmd_link_delete(cmd);
 }
 
 void Pixart_Gesture::readRegs(uint8_t addr, uint8_t *values, int size) {
-    if(spi_cs != GESTURE_SPI_USELESS) {
-        digitalWrite(spi_cs, LOW);
-        SPI.transfer(addr | 0x80);
-        for(int i = 0; i < size; i++) {
-            values[i] = SPI.transfer(0x00);
-        }
-        digitalWrite(spi_cs, HIGH);
-    } else {
-        Wire.beginTransmission(i2c_addr);
-        Wire.write(addr);
-        Wire.endTransmission();
-        Wire.requestFrom((int)i2c_addr, (int)size);
-        while (Wire.available()) {
-            *values = Wire.read();
-            values++;
-        }
+    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+    i2c_master_start(cmd);
+    i2c_master_write_byte(cmd, (i2c_addr << 1) | I2C_MASTER_WRITE, true);
+    i2c_master_write_byte(cmd, addr, true);
+    i2c_master_start(cmd); // Restart for read operation
+    i2c_master_write_byte(cmd, (i2c_addr << 1) | I2C_MASTER_READ, true);
+    if (size > 1) {
+        i2c_master_read(cmd, values, size - 1, I2C_MASTER_ACK);
     }
+    i2c_master_read_byte(cmd, values + size - 1, I2C_MASTER_NACK);
+    i2c_master_stop(cmd);
+    i2c_master_cmd_begin(i2c_port, cmd, 1000 / portTICK_PERIOD_MS);
+    i2c_cmd_link_delete(cmd);
 }
 
 uint8_t Pixart_Gesture::readReg(uint8_t addr) {
@@ -72,21 +65,34 @@ uint8_t Pixart_Gesture::readReg(uint8_t addr) {
 
 /********************** PAJ7620 Gesture Sensor **********************/
 
-bool paj7620::init()
-{   
-    spi_cs = GESTURE_SPI_USELESS;
+bool paj7620::init() {
     i2c_addr = PAJ7620_I2C_ADDR;
-    Wire.begin();
-    delay(10);
+
+    // Initialize I2C using ESP-IDF's API
+    i2c_config_t conf;
+    conf.mode = I2C_MODE_MASTER;
+    conf.sda_io_num = GPIO_NUM_6;
+    conf.scl_io_num = GPIO_NUM_7;
+    conf.sda_pullup_en = GPIO_PULLUP_ENABLE;
+    conf.scl_pullup_en = GPIO_PULLUP_ENABLE;
+    conf.clk_flags = 0;
+    conf.master.clk_speed = 400000;
+
+    i2c_param_config(i2c_port, &conf);
+    i2c_driver_install(i2c_port, conf.mode, 0, 0, 0);
+
+    vTaskDelay(10 / portTICK_PERIOD_MS);
     writeReg(0xff, 0x00);
-    delay(50);
-    /* check ID */
+    vTaskDelay(50 / portTICK_PERIOD_MS);
+
+    // Check ID
     if((readReg(0x01) != 0x76) || (readReg(0x00) != 0x20))
         return false;
-    /* Load the registers data */
+
+    // Load the registers data
     for(uint8_t i = 0; i < INIT_REG_ARRAY_SIZE; i++)
         writeReg(initRegisterArray[i][0], initRegisterArray[i][1]);
-    /* Set report mode to Gesture */
+
     setReportMode(NEAR_240FPS);
     return true;
 }
@@ -139,39 +145,45 @@ bool paj7620::setReportMode(uint8_t reportMode) {
 }
 
 /********************** PAG7660 Gesture Sensor **********************/
+#include "driver/spi_master.h"
+#include "driver/i2c.h"
+#include "driver/gpio.h"
+#include "esp_log.h"
 
-bool pag7660::init(uint8_t cs) {
-    spi_cs = cs;
-    if(spi_cs != GESTURE_SPI_USELESS) {
-        SPI.begin();
-        pinMode(spi_cs, OUTPUT);
-        digitalWrite(spi_cs, HIGH);
-        Serial.println("PAG7660: Use SPI for transfer");
-    } else {
-        i2c_addr = PAG7660_I2C_ADDR;
-        Wire.begin();
-    }
+bool pag7660::init() {
+    i2c_addr = PAG7660_I2C_ADDR;
+    i2c_config_t conf;
+    conf.mode = I2C_MODE_MASTER;
+    conf.sda_io_num = GPIO_NUM_6;
+    conf.scl_io_num = GPIO_NUM_7;
+    conf.sda_pullup_en = GPIO_PULLUP_ENABLE;
+    conf.scl_pullup_en = GPIO_PULLUP_ENABLE;
+    conf.master.clk_speed = 400000;
+    conf.clk_flags = 0;
+    i2c_param_config(i2c_port, &conf);
+    i2c_driver_install(i2c_port, conf.mode, 0, 0, 0);
 
-    delay(50);
+    vTaskDelay(50 / portTICK_PERIOD_MS);
     const uint8_t regs[][2] = {
         { 0x10, 0x04 },        // Set operation to gesture mode
         { 0x22, gestureMode }, // Set gesture mode
         { 0x0A, 0x01 },        // enable cpu
     };
-    /* check ID */
+
+    // Check ID
     uint16_t id;
     id = (readReg(1) << 8) | readReg(0);
     if (id != 0x7660) {
-        Serial.print("check id failed: ");
-        Serial.println(id);
+        ESP_LOGE("PAG7660", "check id failed: %d", id);
         return false;
     }
-    /* Load the registers data */
+
+    // Load the registers data
     for (int i = 0; i < sizeof(regs)/2; i++) {
         writeReg(regs[i][0], regs[i][1]);
-        delay(10);
+        vTaskDelay(10 / portTICK_PERIOD_MS);
     }
-    delay(250);
+    vTaskDelay(250 / portTICK_PERIOD_MS);
     return true;
 }
 
